@@ -59,18 +59,23 @@ public class Broker {
         }
 
         private void register() {
-
             InetSocketAddress client = message.getSender();
-
-            registerClient(client);
-            updateNeighborsOnRegister(client);
-        }
-
-        private void registerClient(InetSocketAddress client) {
             String CLIENT_PREFIX = "client";
             int clientSize = clients.synchronizedClientSize();
             String clientId = CLIENT_PREFIX + "_" + clientSize + 1;
 
+            registerClient(client, clientId);
+            handTokenToFirstClient(clientSize, client);
+            updateNeighborsOnRegister(client);
+        }
+
+        private void handTokenToFirstClient(int clientSize, InetSocketAddress client) {
+            if(clientSize == 1) {
+                endpoint.send(client, new Token());
+            }
+        }
+
+        private void registerClient(InetSocketAddress client, String clientId) {
             clients.addClientSynchronously(clientId, client);
             endpoint.send(client, new RegisterResponse(clientId));
         }
