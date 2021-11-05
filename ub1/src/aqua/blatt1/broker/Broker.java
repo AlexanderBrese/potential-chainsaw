@@ -2,9 +2,7 @@ package aqua.blatt1.broker;
 
 import aqua.blatt1.common.Direction;
 import aqua.blatt1.common.Properties;
-import aqua.blatt1.common.msgtypes.DeregisterRequest;
-import aqua.blatt1.common.msgtypes.HandoffRequest;
-import aqua.blatt1.common.msgtypes.RegisterResponse;
+import aqua.blatt1.common.msgtypes.*;
 import messaging.Endpoint;
 import messaging.Message;
 
@@ -12,8 +10,6 @@ import javax.swing.*;
 import java.net.InetSocketAddress;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class Broker {
     private final Endpoint endpoint;
@@ -29,11 +25,11 @@ public class Broker {
 
     private class BrokerTask implements Runnable {
         private final Message message;
-        private final ReadWriteLock lock;
+
 
         public BrokerTask(Message message) {
             this.message = message;
-            lock = new ReentrantReadWriteLock();
+
         }
 
         @Override
@@ -42,28 +38,19 @@ public class Broker {
 
             switch (messageType) {
                 case "RegisterRequest" -> {
-                    String CLIENT_PREFIX = "client";
-                    int clientSize = synchronizedClientSize();
-                    String clientId = CLIENT_PREFIX + "_" + clientSize + 1;
-                    InetSocketAddress client = message.getSender();
-
-                    addClientSynchronously(clientId, client);
-                    endpoint.send(client, new RegisterResponse(clientId));
+                    register();
                 }
                 case "DeregisterRequest" -> {
-                    String clientId = ((DeregisterRequest) message.getPayload()).getId();
-                    int clientIdx = synchronizedClientIdx(clientId);
-
-                    removeClientSynchronously(clientIdx);
+                    deregister();
                 }
                 case "HandoffRequest" -> {
-                    int clientIdx = synchronizedClientIdx(message.getSender());
+                    int clientIdx = clients.synchronizedClientIdx(message.getSender());
                     HandoffRequest req = (HandoffRequest) message.getPayload();
                     InetSocketAddress neighbor;
                     if (req.getFish().getDirection() == Direction.LEFT) {
-                        neighbor = synchronizedLeftNeighbor(clientIdx);
+                        neighbor = clients.synchronizedLeftNeighbor(clientIdx);
                     } else {
-                        neighbor = synchronizedRightNeighbor(clientIdx);
+                        neighbor = clients.synchronizedRightNeighbor(clientIdx);
                     }
 
                     endpoint.send(neighbor, req);
@@ -71,56 +58,53 @@ public class Broker {
             }
         }
 
-        private int synchronizedClientSize() {
-            int clientSize;
-            lock.readLock().lock();
-            clientSize = clients.size();
-            lock.readLock().unlock();
-            return clientSize;
+        private void register() {
+
+            InetSocketAddress client = message.getSender();
+
+            registerClient(client);
+            updateNeighborsOnRegister(client);
         }
 
-        private int synchronizedClientIdx(InetSocketAddress sender) {
-            int clientIdx;
-            lock.readLock().lock();
-            clientIdx = clients.indexOf(sender);
-            lock.readLock().unlock();
-            return clientIdx;
+        private void registerClient(InetSocketAddress client) {
+            String CLIENT_PREFIX = "client";
+            int clientSize = clients.synchronizedClientSize();
+            String clientId = CLIENT_PREFIX + "_" + clientSize + 1;
+
+            clients.addClientSynchronously(clientId, client);
+            endpoint.send(client, new RegisterResponse(clientId));
         }
 
-        private int synchronizedClientIdx(String clientId) {
-            int clientIdx;
-            lock.readLock().lock();
-            clientIdx = clients.indexOf(clientId);
-            lock.readLock().unlock();
-            return clientIdx;
+        private void updateNeighborsOnRegister(InetSocketAddress client) {
+            int clientIdx = clients.synchronizedClientIdx(client);
+            InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
+            InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
+
+            endpoint.send(leftNeighbor, new NeighborRegisterUpdate(client, Direction.RIGHT));
+            endpoint.send(rightNeighbor, new NeighborRegisterUpdate(client, Direction.LEFT));
+            endpoint.send(client, new NeighborRegisterUpdate(leftNeighbor, Direction.LEFT));
+            endpoint.send(client, new NeighborRegisterUpdate(rightNeighbor, Direction.RIGHT));
         }
 
-        private InetSocketAddress synchronizedLeftNeighbor(int clientIdx) {
-            InetSocketAddress leftNeighbor;
-            lock.readLock().lock();
-            leftNeighbor = clients.getLeftNeighorOf(clientIdx);
-            lock.readLock().unlock();
-            return leftNeighbor;
+        private void deregister() {
+            deregisterClient();
+            updateNeighborsOnDeregister();
         }
 
-        private InetSocketAddress synchronizedRightNeighbor(int clientIdx) {
-            InetSocketAddress rightNeighbor;
-            lock.readLock().lock();
-            rightNeighbor = clients.getRightNeighorOf(clientIdx);
-            lock.readLock().unlock();
-            return rightNeighbor;
+        private void deregisterClient() {
+            String clientId = ((DeregisterRequest) message.getPayload()).getId();
+            int clientIdx = clients.synchronizedClientIdx(clientId);
+
+            clients.removeClientSynchronously(clientIdx);
         }
 
-        private void removeClientSynchronously(int clientIdx) {
-            lock.writeLock().lock();
-            clients.remove(clientIdx);
-            lock.writeLock().unlock();
-        }
-
-        private void addClientSynchronously(String clientId, InetSocketAddress client) {
-            lock.writeLock().lock();
-            clients.add(clientId, client);
-            lock.writeLock().unlock();
+        private void updateNeighborsOnDeregister() {
+            InetSocketAddress client = message.getSender();
+            int clientIdx = clients.synchronizedClientIdx(client);
+            InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
+            InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
+            endpoint.send(leftNeighbor, new NeighborDeregisterUpdate(Direction.RIGHT));
+            endpoint.send(rightNeighbor, new NeighborDeregisterUpdate(Direction.LEFT));
         }
     }
 
@@ -141,6 +125,7 @@ public class Broker {
                 break;
             }
         }
+        executor.shutdown();
     }
 
     public void brokerWithPoisonPill() {
