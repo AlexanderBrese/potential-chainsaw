@@ -7,8 +7,21 @@ import java.util.concurrent.TimeUnit;
 
 import aqua.blatt1.common.Direction;
 import aqua.blatt1.common.FishModel;
+import aqua.blatt1.common.RecordState;
+import aqua.blatt1.common.msgtypes.SnapshotMarker;
+import aqua.blatt1.common.msgtypes.SnapshotToken;
+import messaging.Message;
 
 public class TankModel extends Observable implements Iterable<FishModel> {
+    private class Snapshot {
+        public int state;
+        public Queue<Message> leftInputChannel = new LinkedList<>();
+        public Queue<Message> rightInputChannel = new LinkedList<>();
+
+        public Snapshot() {
+        }
+    }
+
 
     public static final int WIDTH = 600;
     public static final int HEIGHT = 350;
@@ -22,6 +35,11 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     private InetSocketAddress rightNeighbor;
     private Boolean token = false;
     private final Timer timer;
+    private RecordState recordState = RecordState.IDLE;
+    private LinkedList<Snapshot> snapshots = new LinkedList<>();
+    private Snapshot currentSnapshot = new Snapshot();
+    private SnapshotToken snapshotToken;
+    private boolean initiator = false;
 
     public TankModel(ClientCommunicator.ClientForwarder forwarder) {
         this.forwarder = forwarder;
@@ -49,6 +67,10 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     synchronized void receiveFish(FishModel fish) {
         fish.setToStart();
         fishies.add(fish);
+
+        if (recordState != RecordState.IDLE) {
+            currentSnapshot.state = fishies.size();
+        }
     }
 
     public void addNeighbor(InetSocketAddress neighbor, Direction direction) {
@@ -87,7 +109,7 @@ public class TankModel extends Observable implements Iterable<FishModel> {
             fish.update();
 
             if (fish.hitsEdge()) {
-                if(hasToken()) {
+                if (hasToken()) {
                     if (fish.getDirection().equals(Direction.LEFT) && leftNeighbor != null) {
                         forwarder.handOff(fish, leftNeighbor);
                     } else if (fish.getDirection().equals(Direction.RIGHT) && rightNeighbor != null) {
@@ -142,5 +164,109 @@ public class TankModel extends Observable implements Iterable<FishModel> {
 
     public Boolean hasToken() {
         return token;
+    }
+
+    public void initiateSnapshot() {
+        initiator = true;
+        this.snapshotToken = null;
+        currentSnapshot.state = fishies.size();
+        recordState = RecordState.BOTH;
+        SnapshotToken snapshotToken = new SnapshotToken(currentSnapshot.state);
+
+        sendSnapshotMarker();
+        forwarder.sendSnapshotToken(leftNeighbor, snapshotToken);
+
+    }
+
+    private void sendSnapshotMarker() {
+        forwarder.sendSnapshotMarker(leftNeighbor);
+        forwarder.sendSnapshotMarker(rightNeighbor);
+    }
+
+    public void receiveSnapshotMarker(InetSocketAddress sender) {
+        System.out.println("RECORD STATE = " + recordState);
+        if (recordState == RecordState.IDLE) {
+            currentSnapshot.state = fishies.size();
+            snapshots.add(currentSnapshot);
+            if (sender.equals(leftNeighbor)) {
+                recordState = RecordState.RIGHT;
+                sendSnapshotMarker();
+                currentSnapshot.leftInputChannel = new LinkedList<>();
+            } else if (sender.equals(rightNeighbor)) {
+                recordState = RecordState.LEFT;
+                sendSnapshotMarker();
+                currentSnapshot.rightInputChannel = new LinkedList<>();
+            } else {
+                System.err.println("error: unknown sender sent snapshot marker");
+            }
+        } else {
+            if (recordState == RecordState.BOTH) {
+                if (sender.equals(leftNeighbor)) {
+                    recordState = RecordState.RIGHT;
+                } else if (sender.equals(rightNeighbor)) {
+                    recordState = RecordState.LEFT;
+                }
+            } else {
+                recordState = RecordState.IDLE;
+                /*
+                if (snapshotToken != null) {
+                    forwarder.sendSnapshotToken(leftNeighbor, new SnapshotToken(currentSnapshot.state + this.snapshotToken.getSnapshot()));
+                    snapshotToken = null;
+                }
+                 */
+                //currentSnapshot = new Snapshot();
+            }
+            snapshots.add(currentSnapshot);
+            // snapshots.add(currentSnapshot);
+        }
+    }
+
+    public void receiveHandoffMessage(Message msg) {
+        System.out.println("handoff sender " + msg.getSender());
+        System.out.println("record state " + recordState);
+        if (recordState == RecordState.IDLE) {
+            return;
+        }
+
+        if ((recordState == RecordState.BOTH || recordState == RecordState.LEFT) && msg.getSender().equals(leftNeighbor)) {
+            currentSnapshot.leftInputChannel.add(msg);
+        } else if ((recordState == RecordState.BOTH || recordState == RecordState.RIGHT) && msg.getSender().equals(rightNeighbor)) {
+            currentSnapshot.rightInputChannel.add(msg);
+        }
+    }
+
+    public void receiveSnapshotToken(SnapshotToken snapshotToken) {
+        System.out.println("RECORD STATE = " + recordState);
+        this.snapshotToken = snapshotToken;
+        if (!this.isInitiator() && this.recordState == RecordState.IDLE) {
+            System.out.println(currentSnapshot.rightInputChannel);
+            System.out.println(currentSnapshot.rightInputChannel.size());
+            System.out.println(currentSnapshot.leftInputChannel);
+            System.out.println(currentSnapshot.leftInputChannel.size());
+            forwarder.sendSnapshotToken(leftNeighbor, new SnapshotToken(currentSnapshot.state + this.snapshotToken.getSnapshot()));
+            this.snapshotToken = null;
+        } else if (this.isInitiator()) {
+            snapshots.forEach(snapshot -> {
+                System.out.println("right channel messages:" + snapshot.rightInputChannel.size());
+                System.out.println("left channel messages:" + snapshot.leftInputChannel.size());
+            });
+            System.out.println(snapshots.size());
+        }
+    }
+
+    public boolean isInitiator() {
+        return initiator;
+    }
+
+    public boolean hasSnapshotToken() {
+        return snapshotToken != null;
+    }
+
+    public int getSnapshot() {
+        return snapshotToken.getSnapshot();
+    }
+
+    public void unsetInitiator() {
+        initiator = false;
     }
 }
