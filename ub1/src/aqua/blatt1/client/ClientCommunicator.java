@@ -47,6 +47,10 @@ public class ClientCommunicator {
         public void sendToken(InetSocketAddress neighbor) {
             endpoint.send(neighbor, new Token());
         }
+
+        public void sendLocationRequest(InetSocketAddress neighbor, String fishId) {
+            endpoint.send(neighbor, new LocationRequest(fishId));
+        }
     }
 
     public class ClientReceiver extends Thread {
@@ -78,7 +82,7 @@ public class ClientCommunicator {
                     }
 
                     case "NeighborDeregisterUpdate" -> {
-                        tankModel.removeNeighbor(((NeighborDeregisterUpdate)msg.getPayload()).getDirection());
+                        tankModel.removeNeighbor(((NeighborDeregisterUpdate) msg.getPayload()).getDirection());
                     }
 
                     case "Token" -> {
@@ -93,6 +97,10 @@ public class ClientCommunicator {
                     case "SnapshotToken" -> {
                         System.out.println("received snapshot token");
                         tankModel.receiveSnapshotToken((SnapshotToken) msg.getPayload());
+                    }
+
+                    case "LocationRequest" -> {
+                        tankModel.locateFishGlobally(((LocationRequest) msg.getPayload()).getFishId());
                     }
                 }
 

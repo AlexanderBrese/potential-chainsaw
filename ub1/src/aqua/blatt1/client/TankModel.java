@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit;
 
 import aqua.blatt1.common.Direction;
 import aqua.blatt1.common.FishModel;
+import aqua.blatt1.common.Position;
 import aqua.blatt1.common.RecordState;
 import aqua.blatt1.common.msgtypes.SnapshotMarker;
 import aqua.blatt1.common.msgtypes.SnapshotToken;
@@ -29,6 +30,7 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     protected static final Random rand = new Random();
     protected volatile String id;
     protected final Set<FishModel> fishies;
+    private final Map<String, Position> fishPositions;
     protected int fishCounter = 0;
     protected final ClientCommunicator.ClientForwarder forwarder;
     private InetSocketAddress leftNeighbor;
@@ -44,6 +46,7 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     public TankModel(ClientCommunicator.ClientForwarder forwarder) {
         this.forwarder = forwarder;
         fishies = Collections.newSetFromMap(new ConcurrentHashMap<>());
+        fishPositions = new ConcurrentHashMap<>();
         timer = new Timer();
     }
 
@@ -61,13 +64,18 @@ public class TankModel extends Observable implements Iterable<FishModel> {
                     rand.nextBoolean() ? Direction.LEFT : Direction.RIGHT);
 
             fishies.add(fish);
+            fishPositions.put(fish.getId(), Position.HERE);
         }
     }
 
     synchronized void receiveFish(FishModel fish) {
         fish.setToStart();
         fishies.add(fish);
-
+        if(fishPositions.containsKey(fish.getId())) {
+            fishPositions.replace(fish.getId(), Position.HERE);
+        } else {
+            fishPositions.put(fish.getId(), Position.HERE);
+        }
         if (recordState != RecordState.IDLE) {
             currentSnapshot.state = fishies.size();
         }
@@ -112,8 +120,10 @@ public class TankModel extends Observable implements Iterable<FishModel> {
                 if (hasToken()) {
                     if (fish.getDirection().equals(Direction.LEFT) && leftNeighbor != null) {
                         forwarder.handOff(fish, leftNeighbor);
+                        fishPositions.replace(fish.getId(), Position.LEFT);
                     } else if (fish.getDirection().equals(Direction.RIGHT) && rightNeighbor != null) {
                         forwarder.handOff(fish, rightNeighbor);
+                        fishPositions.replace(fish.getId(), Position.RIGHT);
                     }
                 } else {
                     fish.reverse();
@@ -268,5 +278,24 @@ public class TankModel extends Observable implements Iterable<FishModel> {
 
     public void unsetInitiator() {
         initiator = false;
+    }
+
+    public void locateFishGlobally(String fishId) {
+        Position currentFishPosition = fishPositions.get(fishId);
+        if(currentFishPosition.equals(Position.HERE)) {
+            locateFishLocally(fishId);
+        } else if(currentFishPosition.equals(Position.LEFT)) {
+            forwarder.sendLocationRequest(leftNeighbor, fishId);
+        } else if(currentFishPosition.equals(Position.RIGHT)) {
+            forwarder.sendLocationRequest(rightNeighbor, fishId);
+        }
+    }
+
+    public void receiveLocationRequest(String fishId) {
+        locateFishLocally(fishId);
+    }
+
+    private void locateFishLocally(String fishId) {
+        fishies.stream().filter((fish) -> fish.getId().equals(fishId)).findAny().ifPresent(FishModel::toggle);
     }
 }
