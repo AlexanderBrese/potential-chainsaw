@@ -1,6 +1,8 @@
 package aqua.blatt1.client;
 
 import java.net.InetSocketAddress;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import aqua.blatt1.common.msgtypes.*;
 import messaging.Endpoint;
@@ -10,9 +12,11 @@ import aqua.blatt1.common.Properties;
 
 public class ClientCommunicator {
     private final Endpoint endpoint;
+    private final Timer timer;
 
     public ClientCommunicator() {
         endpoint = new Endpoint();
+        timer = new Timer();
     }
 
     public class ClientForwarder {
@@ -70,6 +74,14 @@ public class ClientCommunicator {
                 switch (messageType) {
                     case "RegisterResponse" -> {
                         tankModel.onRegistration(((RegisterResponse) msg.getPayload()).getId());
+                        TimerTask task = new TimerTask() {
+                            @Override
+                            public void run() {
+                                System.out.println("Client reregistering with id " + ((RegisterResponse) msg.getPayload()).getId());
+                                tankModel.forwarder.register();
+                            }
+                        };
+                        timer.schedule(task, 0, ((RegisterResponse) msg.getPayload()).getLeaseDuration());
                     }
                     case "HandoffRequest" -> {
                         tankModel.receiveHandoffMessage(msg);

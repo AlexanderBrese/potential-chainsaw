@@ -8,6 +8,8 @@ import messaging.Message;
 
 import javax.swing.*;
 import java.net.InetSocketAddress;
+import java.util.Date;
+import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -16,11 +18,32 @@ public class Broker {
     private final ClientCollection<InetSocketAddress> clients;
     private final ExecutorService executor;
     private static volatile boolean stopRequested = false;
+    private final Integer leaseDuration = 10000;
 
     public Broker() {
         endpoint = new Endpoint(Properties.PORT);
         clients = new ClientCollection<>();
         executor = Executors.newFixedThreadPool(Properties.THREAD_POOL_SIZE);
+        java.util.Timer timer = new java.util.Timer();
+        TimerTask task = new TimerTask() {
+            @Override
+            public void run() {
+                for(int clientIdx = 0; clientIdx < clients.synchronizedClientSize(); clientIdx++) {
+                    Date now = new Date();
+                    Date clientDate = clients.synchronizedClientDate(clientIdx);
+
+                    if(now.getTime() - clientDate.getTime() > leaseDuration) {
+                        System.out.println("Deregestering Client (lease expired) " + clientIdx);
+                        clients.removeClientSynchronously(clientIdx);
+                        InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
+                        InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
+                        endpoint.send(leftNeighbor, new NeighborDeregisterUpdate(Direction.RIGHT));
+                        endpoint.send(rightNeighbor, new NeighborDeregisterUpdate(Direction.LEFT));
+                    }
+                }
+            }
+        };
+        timer.schedule(task, 0, leaseDuration * 2);
     }
 
     private class BrokerTask implements Runnable {
@@ -60,6 +83,12 @@ public class Broker {
 
         private void register() {
             InetSocketAddress client = message.getSender();
+            int clientIdx = clients.synchronizedClientIdx(client);
+            if(clientIdx != -1) {
+                System.out.println("Updating client lease for " + clientIdx);
+                clients.updateClientDateSynchronously(clientIdx, new Date());
+                return;
+            }
             String CLIENT_PREFIX = "client";
             int clientSize = clients.synchronizedClientSize();
             String clientId = CLIENT_PREFIX + "_" + clientSize + 1;
@@ -76,8 +105,8 @@ public class Broker {
         }
 
         private void registerClient(InetSocketAddress client, String clientId) {
-            clients.addClientSynchronously(clientId, client);
-            endpoint.send(client, new RegisterResponse(clientId));
+            clients.addClientSynchronously(clientId, client, new Date());
+            endpoint.send(client, new RegisterResponse(clientId, leaseDuration));
         }
 
         private void updateNeighborsOnRegister(InetSocketAddress client) {
@@ -92,20 +121,19 @@ public class Broker {
         }
 
         private void deregister() {
-            deregisterClient();
-            updateNeighborsOnDeregister();
+            int clientIdx = deregisterClient();
+            updateNeighborsOnDeregister(clientIdx);
         }
 
-        private void deregisterClient() {
+        private int deregisterClient() {
             String clientId = ((DeregisterRequest) message.getPayload()).getId();
             int clientIdx = clients.synchronizedClientIdx(clientId);
 
             clients.removeClientSynchronously(clientIdx);
+            return clientIdx;
         }
 
-        private void updateNeighborsOnDeregister() {
-            InetSocketAddress client = message.getSender();
-            int clientIdx = clients.synchronizedClientIdx(client);
+        private void updateNeighborsOnDeregister(int clientIdx) {
             InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
             InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
             endpoint.send(leftNeighbor, new NeighborDeregisterUpdate(Direction.RIGHT));
