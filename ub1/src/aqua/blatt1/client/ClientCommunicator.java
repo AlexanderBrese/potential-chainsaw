@@ -4,6 +4,7 @@ import java.net.InetSocketAddress;
 import java.util.Timer;
 import java.util.TimerTask;
 
+import aqua.blatt1.common.SecureEndpoint;
 import aqua.blatt1.common.msgtypes.*;
 import messaging.Endpoint;
 import messaging.Message;
@@ -15,7 +16,7 @@ public class ClientCommunicator {
     private final Timer timer;
 
     public ClientCommunicator() {
-        endpoint = new Endpoint();
+        endpoint = new SecureEndpoint(new Endpoint());
         timer = new Timer();
     }
 

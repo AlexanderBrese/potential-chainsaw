@@ -1,97 +1,113 @@
 package aqua.blatt1.common;
 
+import aqua.blatt1.common.msgtypes.KeyExchangeMessage;
 import messaging.Endpoint;
 import messaging.Message;
 
-import javax.crypto.BadPaddingException;
-import javax.crypto.Cipher;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.NoSuchPaddingException;
-import javax.crypto.spec.SecretKeySpec;
+import javax.crypto.*;
 import java.io.*;
 import java.net.InetSocketAddress;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
+import java.security.*;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
 
 public class SecureEndpoint extends Endpoint {
     final Endpoint endpoint;
-    final SecretKeySpec symmetricKey;
+    KeyPair keyPair;
     Cipher encrypt;
     Cipher decrypt;
+    Map<InetSocketAddress, PublicKey> communicationPartnerPublicKeys = new HashMap<>();
 
-    SecureEndpoint(Endpoint endpoint) {
+    public SecureEndpoint(Endpoint endpoint) {
         this.endpoint = endpoint;
-        this.symmetricKey = new SecretKeySpec("CAFEBABECAFEBABE".getBytes(), "AES");
         try {
-            this.encrypt = Cipher.getInstance("AES");
-            this.decrypt = Cipher.getInstance("AES");
-            this.encrypt.init(Cipher.ENCRYPT_MODE, this.symmetricKey);
-            this.decrypt.init(Cipher.DECRYPT_MODE, this.symmetricKey);
+            this.keyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
+            this.encrypt = Cipher.getInstance("RSA");
+            this.decrypt = Cipher.getInstance("RSA");
+            this.decrypt.init(Cipher.DECRYPT_MODE, this.keyPair.getPrivate());
         } catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException e) {
             e.printStackTrace();
         }
     }
 
     public void send(InetSocketAddress receiver, Serializable payload) {
+        if(!communicationPartnerPublicKeys.containsKey(receiver)) {
+            endpoint.send(receiver, new KeyExchangeMessage(keyPair.getPublic()));
+            Message message = endpoint.blockingReceive();
+            communicationPartnerPublicKeys.put(message.getSender(), ((KeyExchangeMessage) payload).publicKey);
+        }
         try {
-            byte[] encrypted = encrypt.doFinal(fromPayload(payload));
-            endpoint.send(receiver, toPayload(encrypted));
+            byte[] converted = Objects.requireNonNull(convertToBytes(payload));
+            this.encrypt.init(Cipher.ENCRYPT_MODE, communicationPartnerPublicKeys.get(receiver));
+            byte[] encrypted = encrypt.doFinal(converted);
+            byte[] encoded = Base64.getEncoder().encode(encrypted);
+            endpoint.send(receiver, new String(encoded));
+        } catch (IllegalBlockSizeException | BadPaddingException | InvalidKeyException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private byte[] convertToBytes(Object object) {
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             ObjectOutputStream out = new ObjectOutputStream(bos)) {
+            out.writeObject(object);
+            return bos.toByteArray();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    private Serializable convertFromBytes(byte[] bytes) {
+        try (ByteArrayInputStream bis = new ByteArrayInputStream(bytes);
+             ObjectInputStream in = new ObjectInputStream(bis)) {
+            return (Serializable) in.readObject();
+        } catch (IOException | ClassNotFoundException e) {
+            e.printStackTrace();
+        }
+
+        return null;
+    }
+
+    public Message nonBlockingReceive() {
+        Message message = endpoint.nonBlockingReceive();
+
+        Serializable payload = message.getPayload();
+        if(payload instanceof KeyExchangeMessage) {
+            communicationPartnerPublicKeys.put(message.getSender(), ((KeyExchangeMessage) payload).publicKey);
+            endpoint.send(message.getSender(), keyPair.getPublic());
+            return null;
+        }
+        try {
+            byte[] converted = Objects.requireNonNull(convertToBytes(payload));
+            byte[] decoded = Base64.getDecoder().decode(converted);
+            payload = new String(decrypt.doFinal(decoded));
         } catch (IllegalBlockSizeException | BadPaddingException e) {
             e.printStackTrace();
         }
-    }
 
-    private byte[] fromPayload(Serializable payload) {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        ObjectOutputStream out;
-        byte[] bytes = null;
-        try {
-            out = new ObjectOutputStream(bos);
-            out.writeObject(payload);
-            out.flush();
-            bytes = bos.toByteArray();
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                bos.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-
-        return bytes;
-    }
-
-    private Serializable toPayload(byte[] payload) {
-        ByteArrayInputStream bis = new ByteArrayInputStream(payload);
-        ObjectInput in = null;
-        Serializable out = null;
-        try {
-            in = new ObjectInputStream(bis);
-            out = (Serializable) in.readObject();
-        } catch (IOException | ClassNotFoundException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                if (in != null) {
-                    in.close();
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-
-        return out;
-    }
-
-
-
-    public Message nonBlockingReceive() {
-
+        return new Message(payload, message.getSender());
     }
 
     public Message blockingReceive() {
+        Message message = endpoint.blockingReceive();
 
+        Serializable payload = message.getPayload();
+        if(payload instanceof KeyExchangeMessage) {
+            communicationPartnerPublicKeys.put(message.getSender(), ((KeyExchangeMessage) payload).publicKey);
+            endpoint.send(message.getSender(), keyPair.getPublic());
+            return null;
+        }
+        try {
+            byte[] converted = Objects.requireNonNull(convertToBytes(payload));
+            byte[] decoded = Base64.getDecoder().decode(converted);
+            payload = new String(decrypt.doFinal(decoded));
+        } catch (IllegalBlockSizeException | BadPaddingException e) {
+            e.printStackTrace();
+        }
+
+        return new Message(payload, message.getSender());
     }
 }

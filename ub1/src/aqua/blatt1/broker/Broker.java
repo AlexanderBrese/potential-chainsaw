@@ -2,6 +2,7 @@ package aqua.blatt1.broker;
 
 import aqua.blatt1.common.Direction;
 import aqua.blatt1.common.Properties;
+import aqua.blatt1.common.SecureEndpoint;
 import aqua.blatt1.common.msgtypes.*;
 import messaging.Endpoint;
 import messaging.Message;
@@ -21,7 +22,7 @@ public class Broker {
     private final Integer leaseDuration = 10000;
 
     public Broker() {
-        endpoint = new Endpoint(Properties.PORT);
+        endpoint = new SecureEndpoint(new Endpoint(Properties.PORT));
         clients = new ClientCollection<>();
         executor = Executors.newFixedThreadPool(Properties.THREAD_POOL_SIZE);
         java.util.Timer timer = new java.util.Timer();
