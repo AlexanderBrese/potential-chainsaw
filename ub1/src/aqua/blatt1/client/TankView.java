@@ -52,20 +52,12 @@ public class TankView extends JPanel implements Observer {
 	private void doDrawing(Graphics g) {
 		Graphics2D g2d = (Graphics2D) g;
 
-		if(!tankModel.hasToken()) {
-			drawBorders(g2d);
-		}
 
 		for (FishModel fishModel : tankModel) {
 			g2d.drawImage(fishView.getImage(fishModel), fishModel.getX(), fishModel.getY(), null);
 			g2d.drawString(fishModel.getId(), fishModel.getX(), fishModel.getY());
 		}
 
-		if(tankModel.isInitiator() && tankModel.hasSnapshotToken()) {
-			tankModel.unsetInitiator();
-			System.out.println("global snapshot = " + tankModel.getSnapshot());
-			JOptionPane.showMessageDialog(null, "Global Snapshot: " + tankModel.getSnapshot());
-		}
 	}
 
 	@Override

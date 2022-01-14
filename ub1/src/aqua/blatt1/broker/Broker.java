@@ -1,178 +1,104 @@
 package aqua.blatt1.broker;
 
+import aqua.blatt1.client.AquaClient;
 import aqua.blatt1.common.Direction;
+import aqua.blatt1.common.FishModel;
 import aqua.blatt1.common.Properties;
-import aqua.blatt1.common.SecureEndpoint;
-import aqua.blatt1.common.msgtypes.*;
 import messaging.Endpoint;
 import messaging.Message;
 
-import javax.swing.*;
-import java.net.InetSocketAddress;
-import java.util.Date;
-import java.util.TimerTask;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.rmi.RemoteException;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.registry.Registry;
+import java.rmi.server.UnicastRemoteObject;
 
-public class Broker {
+public class Broker implements AquaBroker {
     private final Endpoint endpoint;
-    private final ClientCollection<InetSocketAddress> clients;
-    private final ExecutorService executor;
-    private static volatile boolean stopRequested = false;
-    private final Integer leaseDuration = 10000;
+    private final ClientCollection<AquaClient> clients;
 
     public Broker() {
-        endpoint = new SecureEndpoint(new Endpoint(Properties.PORT));
+        endpoint = new Endpoint(Properties.PORT);
         clients = new ClientCollection<>();
-        executor = Executors.newFixedThreadPool(Properties.THREAD_POOL_SIZE);
-        java.util.Timer timer = new java.util.Timer();
-        TimerTask task = new TimerTask() {
-            @Override
-            public void run() {
-                for(int clientIdx = 0; clientIdx < clients.synchronizedClientSize(); clientIdx++) {
-                    Date now = new Date();
-                    Date clientDate = clients.synchronizedClientDate(clientIdx);
-
-                    if(now.getTime() - clientDate.getTime() > leaseDuration) {
-                        System.out.println("Deregestering Client (lease expired) " + clientIdx);
-                        clients.removeClientSynchronously(clientIdx);
-                        InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
-                        InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
-                        endpoint.send(leftNeighbor, new NeighborDeregisterUpdate(Direction.RIGHT));
-                        endpoint.send(rightNeighbor, new NeighborDeregisterUpdate(Direction.LEFT));
-                    }
-                }
-            }
-        };
-        timer.schedule(task, 0, leaseDuration * 2);
     }
 
-    private class BrokerTask implements Runnable {
-        private final Message message;
+    @Override
+    public void registerRequest(AquaClient client) throws RemoteException {
+        registerClient(client);
+        updateNeighborsOnRegister(client);
+    }
 
+    private void registerClient(AquaClient client) {
+        String CLIENT_PREFIX = "client";
+        int clientSize = clients.synchronizedClientSize();
+        String clientId = CLIENT_PREFIX + "_" + clientSize + 1;
 
-        public BrokerTask(Message message) {
-            this.message = message;
-
-        }
-
-        @Override
-        public void run() {
-            String messageType = message.getPayload().getClass().getSimpleName();
-
-            switch (messageType) {
-                case "RegisterRequest" -> {
-                    register();
-                }
-                case "DeregisterRequest" -> {
-                    deregister();
-                }
-                case "HandoffRequest" -> {
-                    int clientIdx = clients.synchronizedClientIdx(message.getSender());
-                    HandoffRequest req = (HandoffRequest) message.getPayload();
-                    InetSocketAddress neighbor;
-                    if (req.getFish().getDirection() == Direction.LEFT) {
-                        neighbor = clients.synchronizedLeftNeighbor(clientIdx);
-                    } else {
-                        neighbor = clients.synchronizedRightNeighbor(clientIdx);
-                    }
-
-                    endpoint.send(neighbor, req);
-                }
-            }
-        }
-
-        private void register() {
-            InetSocketAddress client = message.getSender();
-            int clientIdx = clients.synchronizedClientIdx(client);
-            if(clientIdx != -1) {
-                System.out.println("Updating client lease for " + clientIdx);
-                clients.updateClientDateSynchronously(clientIdx, new Date());
-                return;
-            }
-            String CLIENT_PREFIX = "client";
-            int clientSize = clients.synchronizedClientSize();
-            String clientId = CLIENT_PREFIX + "_" + clientSize + 1;
-
-            registerClient(client, clientId);
-            handTokenToFirstClient(clientSize, client);
-            updateNeighborsOnRegister(client);
-        }
-
-        private void handTokenToFirstClient(int clientSize, InetSocketAddress client) {
-            if(clientSize == 1) {
-                endpoint.send(client, new Token());
-            }
-        }
-
-        private void registerClient(InetSocketAddress client, String clientId) {
-            clients.addClientSynchronously(clientId, client, new Date());
-            endpoint.send(client, new RegisterResponse(clientId, leaseDuration));
-        }
-
-        private void updateNeighborsOnRegister(InetSocketAddress client) {
-            int clientIdx = clients.synchronizedClientIdx(client);
-            InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
-            InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
-
-            endpoint.send(leftNeighbor, new NeighborRegisterUpdate(client, Direction.RIGHT));
-            endpoint.send(rightNeighbor, new NeighborRegisterUpdate(client, Direction.LEFT));
-            endpoint.send(client, new NeighborRegisterUpdate(leftNeighbor, Direction.LEFT));
-            endpoint.send(client, new NeighborRegisterUpdate(rightNeighbor, Direction.RIGHT));
-        }
-
-        private void deregister() {
-            int clientIdx = deregisterClient();
-            updateNeighborsOnDeregister(clientIdx);
-        }
-
-        private int deregisterClient() {
-            String clientId = ((DeregisterRequest) message.getPayload()).getId();
-            int clientIdx = clients.synchronizedClientIdx(clientId);
-
-            clients.removeClientSynchronously(clientIdx);
-            return clientIdx;
-        }
-
-        private void updateNeighborsOnDeregister(int clientIdx) {
-            InetSocketAddress leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
-            InetSocketAddress rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
-            endpoint.send(leftNeighbor, new NeighborDeregisterUpdate(Direction.RIGHT));
-            endpoint.send(rightNeighbor, new NeighborDeregisterUpdate(Direction.LEFT));
+        clients.addClientSynchronously(clientId, client);
+        try {
+            client.registerResponse(clientId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
         }
     }
 
-    public void brokerWithFlagStop() {
-        Thread backgroundThread = new Thread(() -> {
-            JOptionPane.showMessageDialog(null, "Press OK button to stop server");
-            System.out.println("server stopped");
-            stopRequested = true;
-        });
-        backgroundThread.start();
-        while (!stopRequested) {
-            try {
-                Message message = endpoint.blockingReceive();
-                BrokerTask task = new BrokerTask(message);
-                executor.execute(task);
-            } catch (RuntimeException e) {
-                System.err.println(e.getMessage());
-                break;
-            }
+    private void updateNeighborsOnRegister(AquaClient client) {
+        int clientIdx = clients.synchronizedClientIdx(client);
+        AquaClient leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
+        AquaClient rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
+        try {
+            leftNeighbor.neighborRegister(client, Direction.RIGHT);
+            rightNeighbor.neighborRegister(client, Direction.LEFT);
+            client.neighborRegister(leftNeighbor, Direction.LEFT);
+            client.neighborRegister(rightNeighbor, Direction.RIGHT);
+        } catch (RemoteException e) {
+            e.printStackTrace();
         }
-        executor.shutdown();
+
     }
 
-    public void brokerWithPoisonPill() {
+    @Override
+    public void unregisterRequest(AquaClient client) throws RemoteException {
+        deregisterClient(client);
+        updateNeighborsOnDeregister(client);
+    }
+
+    private void deregisterClient(AquaClient client) {
+        int clientIdx = clients.synchronizedClientIdx(client);
+        clients.removeClientSynchronously(clientIdx);
+    }
+
+    private void updateNeighborsOnDeregister(AquaClient client) {
+        int clientIdx = clients.synchronizedClientIdx(client);
+        AquaClient leftNeighbor = clients.synchronizedLeftNeighbor(clientIdx);
+        AquaClient rightNeighbor = clients.synchronizedRightNeighbor(clientIdx);
+        try {
+            leftNeighbor.neighborUnregister(Direction.RIGHT);
+            rightNeighbor.neighborUnregister(Direction.LEFT);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void handoff(AquaClient client, FishModel fish) throws RemoteException {
+        int clientIdx = clients.synchronizedClientIdx(client);
+        AquaClient neighbor;
+        if (fish.getDirection() == Direction.LEFT) {
+            neighbor = clients.synchronizedLeftNeighbor(clientIdx);
+        } else {
+            neighbor = clients.synchronizedRightNeighbor(clientIdx);
+        }
+
+        neighbor.handoffRequest(fish);
+    }
+
+    @Override
+    public void brokerWithPoisonPill() throws RemoteException {
         while (true) {
             try {
                 Message message = endpoint.blockingReceive();
                 if (message.getPayload().getClass().getSimpleName().equals("PoisonPill")) {
-                    System.out.println("Received poison pill");
-                    executor.shutdownNow();
                     break;
                 }
-                BrokerTask task = new BrokerTask(message);
-                executor.execute(task);
             } catch (RuntimeException e) {
                 System.err.println(e.getMessage());
                 break;
@@ -181,8 +107,15 @@ public class Broker {
     }
 
     public static void main(String[] args) {
-        Broker broker = new Broker();
-        //broker.brokerWithFlagStop();
-        broker.brokerWithPoisonPill();
+        try {
+            Registry registry = LocateRegistry.createRegistry(
+                    Registry.REGISTRY_PORT);
+            AquaBroker stub = (AquaBroker)
+                    UnicastRemoteObject.exportObject(new Broker(), 0);
+            registry.rebind(Properties.BROKER_NAME, stub);
+            //stub.brokerWithPoisonPill();
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
     }
 }

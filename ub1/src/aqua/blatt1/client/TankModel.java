@@ -1,28 +1,16 @@
 package aqua.blatt1.client;
 
-import java.net.InetSocketAddress;
+import java.rmi.RemoteException;
+import java.rmi.server.UnicastRemoteObject;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+import aqua.blatt1.broker.AquaBroker;
 import aqua.blatt1.common.Direction;
 import aqua.blatt1.common.FishModel;
-import aqua.blatt1.common.Position;
-import aqua.blatt1.common.RecordState;
-import aqua.blatt1.common.msgtypes.SnapshotMarker;
-import aqua.blatt1.common.msgtypes.SnapshotToken;
-import messaging.Message;
 
-public class TankModel extends Observable implements Iterable<FishModel> {
-    private class Snapshot {
-        public int state;
-        public Queue<Message> leftInputChannel = new LinkedList<>();
-        public Queue<Message> rightInputChannel = new LinkedList<>();
-
-        public Snapshot() {
-        }
-    }
-
+public class TankModel extends Observable implements Iterable<FishModel>, AquaClient {
 
     public static final int WIDTH = 600;
     public static final int HEIGHT = 350;
@@ -30,24 +18,20 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     protected static final Random rand = new Random();
     protected volatile String id;
     protected final Set<FishModel> fishies;
-    private final Map<String, Position> fishPositions;
     protected int fishCounter = 0;
-    protected final ClientCommunicator.ClientForwarder forwarder;
-    private InetSocketAddress leftNeighbor;
-    private InetSocketAddress rightNeighbor;
-    private Boolean token = false;
-    private final Timer timer;
-    private RecordState recordState = RecordState.IDLE;
-    private LinkedList<Snapshot> snapshots = new LinkedList<>();
-    private Snapshot currentSnapshot = new Snapshot();
-    private SnapshotToken snapshotToken;
-    private boolean initiator = false;
+    private AquaClient leftNeighbor;
+    private AquaClient rightNeighbor;
+    private final AquaBroker broker;
+    private AquaClient clientStub;
 
-    public TankModel(ClientCommunicator.ClientForwarder forwarder) {
-        this.forwarder = forwarder;
+    public TankModel(AquaBroker broker) {
         fishies = Collections.newSetFromMap(new ConcurrentHashMap<>());
-        fishPositions = new ConcurrentHashMap<>();
-        timer = new Timer();
+        this.broker = broker;
+        try {
+            this.clientStub = (AquaClient) UnicastRemoteObject.exportObject(this, 0);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
     }
 
     synchronized void onRegistration(String id) {
@@ -64,24 +48,15 @@ public class TankModel extends Observable implements Iterable<FishModel> {
                     rand.nextBoolean() ? Direction.LEFT : Direction.RIGHT);
 
             fishies.add(fish);
-            fishPositions.put(fish.getId(), Position.HERE);
         }
     }
 
     synchronized void receiveFish(FishModel fish) {
         fish.setToStart();
         fishies.add(fish);
-        if(fishPositions.containsKey(fish.getId())) {
-            fishPositions.replace(fish.getId(), Position.HERE);
-        } else {
-            fishPositions.put(fish.getId(), Position.HERE);
-        }
-        if (recordState != RecordState.IDLE) {
-            currentSnapshot.state = fishies.size();
-        }
     }
 
-    public void addNeighbor(InetSocketAddress neighbor, Direction direction) {
+    public void addNeighbor(AquaClient neighbor, Direction direction) {
         if (direction.equals(Direction.LEFT)) {
             leftNeighbor = neighbor;
         } else {
@@ -117,13 +92,17 @@ public class TankModel extends Observable implements Iterable<FishModel> {
             fish.update();
 
             if (fish.hitsEdge()) {
-                if (hasToken()) {
-                    if (fish.getDirection().equals(Direction.LEFT) && leftNeighbor != null) {
-                        forwarder.handOff(fish, leftNeighbor);
-                        fishPositions.replace(fish.getId(), Position.LEFT);
-                    } else if (fish.getDirection().equals(Direction.RIGHT) && rightNeighbor != null) {
-                        forwarder.handOff(fish, rightNeighbor);
-                        fishPositions.replace(fish.getId(), Position.RIGHT);
+                if (fish.getDirection().equals(Direction.LEFT) && leftNeighbor != null) {
+                    try {
+                        leftNeighbor.handoffRequest(fish);
+                    } catch (RemoteException e) {
+                        e.printStackTrace();
+                    }
+                } else if (fish.getDirection().equals(Direction.RIGHT) && rightNeighbor != null) {
+                    try {
+                        rightNeighbor.handoffRequest(fish);
+                    } catch (RemoteException e) {
+                        e.printStackTrace();
                     }
                 } else {
                     fish.reverse();
@@ -142,7 +121,11 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     }
 
     protected void run() {
-        forwarder.register();
+        try {
+            broker.registerRequest(clientStub);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
 
         try {
             while (!Thread.currentThread().isInterrupted()) {
@@ -155,147 +138,30 @@ public class TankModel extends Observable implements Iterable<FishModel> {
     }
 
     public synchronized void finish() {
-        forwarder.deregister(id);
-    }
-
-
-    public void receiveToken() {
-        token = true;
-
-        TimerTask task = new TimerTask() {
-            @Override
-            public void run() {
-                token = false;
-                forwarder.sendToken(leftNeighbor);
-            }
-        };
-        timer.schedule(task, 2000);
-    }
-
-    public Boolean hasToken() {
-        return token;
-    }
-
-    public void initiateSnapshot() {
-        initiator = true;
-        this.snapshotToken = null;
-        currentSnapshot.state = fishies.size();
-        recordState = RecordState.BOTH;
-        SnapshotToken snapshotToken = new SnapshotToken(currentSnapshot.state);
-
-        sendSnapshotMarker();
-        forwarder.sendSnapshotToken(leftNeighbor, snapshotToken);
-
-    }
-
-    private void sendSnapshotMarker() {
-        forwarder.sendSnapshotMarker(leftNeighbor);
-        forwarder.sendSnapshotMarker(rightNeighbor);
-    }
-
-    public void receiveSnapshotMarker(InetSocketAddress sender) {
-        System.out.println("RECORD STATE = " + recordState);
-        if (recordState == RecordState.IDLE) {
-            currentSnapshot.state = fishies.size();
-            snapshots.add(currentSnapshot);
-            if (sender.equals(leftNeighbor)) {
-                recordState = RecordState.RIGHT;
-                sendSnapshotMarker();
-                currentSnapshot.leftInputChannel = new LinkedList<>();
-            } else if (sender.equals(rightNeighbor)) {
-                recordState = RecordState.LEFT;
-                sendSnapshotMarker();
-                currentSnapshot.rightInputChannel = new LinkedList<>();
-            } else {
-                System.err.println("error: unknown sender sent snapshot marker");
-            }
-        } else {
-            if (recordState == RecordState.BOTH) {
-                if (sender.equals(leftNeighbor)) {
-                    recordState = RecordState.RIGHT;
-                } else if (sender.equals(rightNeighbor)) {
-                    recordState = RecordState.LEFT;
-                }
-            } else {
-                recordState = RecordState.IDLE;
-                /*
-                if (snapshotToken != null) {
-                    forwarder.sendSnapshotToken(leftNeighbor, new SnapshotToken(currentSnapshot.state + this.snapshotToken.getSnapshot()));
-                    snapshotToken = null;
-                }
-                 */
-                //currentSnapshot = new Snapshot();
-            }
-            snapshots.add(currentSnapshot);
-            // snapshots.add(currentSnapshot);
+        try {
+            broker.unregisterRequest(clientStub);
+        } catch (RemoteException e) {
+            e.printStackTrace();
         }
     }
 
-    public void receiveHandoffMessage(Message msg) {
-        System.out.println("handoff sender " + msg.getSender());
-        System.out.println("record state " + recordState);
-        if (recordState == RecordState.IDLE) {
-            return;
-        }
-
-        if ((recordState == RecordState.BOTH || recordState == RecordState.LEFT) && msg.getSender().equals(leftNeighbor)) {
-            currentSnapshot.leftInputChannel.add(msg);
-        } else if ((recordState == RecordState.BOTH || recordState == RecordState.RIGHT) && msg.getSender().equals(rightNeighbor)) {
-            currentSnapshot.rightInputChannel.add(msg);
-        }
+    @Override
+    public void registerResponse(String clientId) throws RemoteException {
+        onRegistration(clientId);
     }
 
-    public void receiveSnapshotToken(SnapshotToken snapshotToken) {
-        System.out.println("RECORD STATE = " + recordState);
-        this.snapshotToken = snapshotToken;
-        if (!this.isInitiator() && this.recordState == RecordState.IDLE) {
-            System.out.println(currentSnapshot.rightInputChannel);
-            System.out.println(currentSnapshot.rightInputChannel.size());
-            System.out.println(currentSnapshot.leftInputChannel);
-            System.out.println(currentSnapshot.leftInputChannel.size());
-            forwarder.sendSnapshotToken(leftNeighbor, new SnapshotToken(currentSnapshot.state + this.snapshotToken.getSnapshot()));
-            this.snapshotToken = null;
-        } else if (this.isInitiator()) {
-            snapshots.forEach(snapshot -> {
-                System.out.println("right channel messages:" + snapshot.rightInputChannel.size());
-                System.out.println("left channel messages:" + snapshot.leftInputChannel.size());
-            });
-            System.out.println(snapshots.size());
-        }
+    @Override
+    public void handoffRequest(FishModel fish) throws RemoteException {
+        receiveFish(fish);
     }
 
-    public boolean isInitiator() {
-        return initiator;
+    @Override
+    public void neighborRegister(AquaClient neighbor, Direction direction) throws RemoteException {
+        addNeighbor(neighbor, direction);
     }
 
-    public boolean hasSnapshotToken() {
-        return snapshotToken != null;
-    }
-
-    public int getSnapshot() {
-        return snapshotToken.getSnapshot();
-    }
-
-    public void unsetInitiator() {
-        initiator = false;
-    }
-
-    public void locateFishGlobally(String fishId) {
-        Position currentFishPosition = fishPositions.get(fishId);
-        if(currentFishPosition.equals(Position.HERE)) {
-            locateFishLocally(fishId);
-        } else if(currentFishPosition.equals(Position.LEFT)) {
-            forwarder.sendLocationRequest(leftNeighbor, fishId);
-        } else if(currentFishPosition.equals(Position.RIGHT)) {
-            forwarder.sendLocationRequest(rightNeighbor, fishId);
-        }
-    }
-
-    public void receiveLocationRequest(String fishId) {
-        locateFishLocally(fishId);
-    }
-
-    private void locateFishLocally(String fishId) {
-        fishies.stream().filter((fish) -> fish.getId().equals(fishId)).findAny().ifPresent(FishModel::toggle);
+    @Override
+    public void neighborUnregister(Direction direction) throws RemoteException {
+        removeNeighbor(direction);
     }
 }

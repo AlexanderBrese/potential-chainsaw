@@ -1,7 +1,6 @@
 package aqua.blatt1.broker;
 
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.List;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -15,12 +14,10 @@ public class ClientCollection<T> {
     private class Client {
         final String id;
         final T client;
-        Date date;
 
-        Client(String id, T client, Date date) {
+        Client(String id, T client) {
             this.id = id;
             this.client = client;
-            this.date = date;
         }
     }
 
@@ -28,12 +25,12 @@ public class ClientCollection<T> {
     private final ReadWriteLock lock;
 
     public ClientCollection() {
-        clients = new ArrayList<>();
+        clients = new ArrayList<Client>();
         lock = new ReentrantReadWriteLock();
     }
 
-    public ClientCollection<T> add(String id, T client, Date date) {
-        clients.add(new Client(id, client, date));
+    public ClientCollection<T> add(String id, T client) {
+        clients.add(new Client(id, client));
         return this;
     }
 
@@ -55,6 +52,12 @@ public class ClientCollection<T> {
                 return i;
         return -1;
     }
+
+    public T getClient(int index) {
+        return clients.get(index).client;
+    }
+
+    public String getClientId(int index) { return clients.get(index).id; }
 
     public int size() {
         return clients.size();
@@ -92,20 +95,12 @@ public class ClientCollection<T> {
         return clientIdx;
     }
 
-    public Date synchronizedClientDate(int clientIdx) {
-        Date date;
+    public String synchronizedClientId(T client) {
+        String clientId;
         lock.readLock().lock();
-        date = clients.get(clientIdx).date;
+        clientId = getClientId(indexOf(client));
         lock.readLock().unlock();
-        return date;
-    }
-
-    public void updateClientDateSynchronously(int clientIdx, Date date) {
-        Client client;
-        lock.readLock().lock();
-        client = clients.get(clientIdx);
-        client.date = date;
-        lock.readLock().unlock();
+        return clientId;
     }
 
     public T synchronizedLeftNeighbor(int clientIdx) {
@@ -130,9 +125,9 @@ public class ClientCollection<T> {
         lock.writeLock().unlock();
     }
 
-    public void addClientSynchronously(String clientId, T client, Date date) {
+    public void addClientSynchronously(String clientId, T client) {
         lock.writeLock().lock();
-        add(clientId, client, date);
+        add(clientId, client);
         lock.writeLock().unlock();
     }
 
